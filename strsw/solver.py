@@ -9,6 +9,10 @@ from firedrake import *
 from firedrake.petsc import PETSc
 import numpy as np
 from abc import ABC, abstractmethod
+import os,sys, shutil
+from tqdm import tqdm
+import warnings
+
 
 def tqg_energy(q, psi, f, h, b):
     return 0.5*assemble( (psi*(q-f) + h*b)*dx )
@@ -33,8 +37,8 @@ class SWParams():
     """ firedrake finite element parameters """
 
     def __init__(self, dt, msh, t, bc='y', cg_deg=1, alpha=None):
-        self.Vdg = FunctionSpace(msh, "DG", 1) # For potential vorticity and buoyancy and height
-        self.Vcg = FunctionSpace(msh, "CG", cg_deg) # For streamfunction and ssh
+        self.Vdg = FunctionSpace(msh, "DG", ) # For potential vorticity and buoyancy and height
+        self.Vcg = FunctionSpace(msh, "CG", cg_deg) # For streamfunction, bathymetry and ssh
         self.Vu = VectorFunctionSpace(msh, "DG", 1) # For velocity
         self.x = SpatialCoordinate(msh)
         self.dt = dt
@@ -186,6 +190,50 @@ class STQGSolver():
             self.ssh.assign(self.psi0 - 0.5 * Function(self.Vcg).project(self.initial_b))
             output_file.write(self.initial_cond, self.psi0, v, self.initial_b, self.ssh, time=t)
 
+    def animate(self, output_visual_name, save_name, scalar=None):
+        import pyvista as pv
+        import matplotlib.pyplot as plt
+        from matplotlib.animation import FuncAnimation
+        
+        filepaths = []
+        for i in sorted(os.listdir(output_visual_name)):
+            if ".vtu" in i:
+                filepaths.append(f"{output_visual_name}/{i}")
+        pv.OFF_SCREEN = True
+
+
+        images = []  # will store arrays for Matplotlib
+
+        for fp in filepaths:
+            mesh = pv.read(fp)
+
+            plotter = pv.Plotter(off_screen=True)
+            if scalar is not None:
+                plotter.add_mesh(mesh, scalars=scalar, cmap="viridis")
+            else:
+                plotter.add_mesh(mesh, cmap="viridis")
+
+            plotter.camera_position = "iso"
+            
+            # Returns an RGBA numpy array
+            img = plotter.screenshot(return_img=True)
+            images.append(img)
+
+            plotter.close()
+
+
+        fig, ax = plt.subplots()
+        im = ax.imshow(images[0])
+        ax.axis("off")
+
+        def update(i):
+            im.set_array(images[i])
+            return [im]
+
+        anim = FuncAnimation(fig, update, frames=len(images), interval=200)
+
+        anim.save(f"{output_visual_name}/{save_name}.mp4", fps=5, dpi=150)
+
     def load_initial_conditions_from_file(self, h5_data_name):
         """
         Read in initial conditions from saved (checkpointed) data file
@@ -264,7 +312,7 @@ class STQGSolver():
         :param zetas_file_name: numpy file name
         :return: 
         """
-        #PETSc.Sys.Print(self.solver_name,flush=True)
+        PETSc.Sys.Print(self.solver_name,flush=True)
         
         # assume q0 is given in initial_cond
         q0 = Function(self.Vdg)
@@ -370,7 +418,8 @@ class STQGSolver():
             #print(noise.shape, np.asarray(self.psi0.dat.data).shape)
 
         step = 0
-        while t < (T - Dt / 2):
+        # while t < (T - Dt / 2):
+        for t in tqdm(np.arange(t,T,Dt)):
             # sort out BM
             if self.solver_name == 'STQG solver':
                 bms = noise[step:step+zetas.shape[0]]
@@ -414,7 +463,7 @@ class STQGSolver():
             q0.assign(q0 / 3 + 2 * self.dq1 / 3)
 
             # Store solutions to xml and pvd
-            t += Dt
+            # t += Dt
             tdump += 1
             if tdump == dumpfreq:
                 tdump -= dumpfreq
@@ -461,8 +510,15 @@ class STQGSolver():
         return noise
 
 if __name__ == "__main__":
+    OMP_NUM_THREADS = 1
+    if os.path.exists("./output"):
+        shutil.rmtree("./output")
     mesh = UnitSquareMesh(32, 32)
     sw_params = SWParams(dt=0.01, msh=mesh, t=1, bc='y', cg_deg=1, alpha=0.1)
     stqg_solver = STQGSolver(sw_params)
     stqg_solver.solve(dumpfreq=10, output_name="output/strsw_test", data_output_name="output/strsw_data_test", comm_manager=None, do_save_data=True, do_save_visual=True, do_save_spectrum=False, res=16)
     stqg_solver.visualise_h5(h5_data_name_prefix="output/strsw_data_test", output_visual_name="output/strsw_test_visual", time_start=0, time_end=1, time_increment=0.1, initial_index=0)
+    stqg_solver.animate("output/strsw_test_visual", "vorticity_anim", "PotentialVorticity")
+    stqg_solver.animate("output/strsw_test_visual", "ssh_anim", "SSH")
+    stqg_solver.animate("output/strsw_test_visual", "buoyancy_anim", "Buoyancy")
+    stqg_solver.animate("output/strsw_test_visual", "streamfunction_anim", "Streamfunction")
