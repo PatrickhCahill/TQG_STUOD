@@ -36,13 +36,14 @@ def tqg_mesh_grid(res):
 class SWParams():
     """ firedrake finite element parameters """
 
-    def __init__(self, dt, msh, t, bc='y', cg_deg=1, alpha=None):
-        self.Vdg = FunctionSpace(msh, "DG", ) # For potential vorticity and buoyancy and height
-        self.Vcg = FunctionSpace(msh, "CG", cg_deg) # For streamfunction, bathymetry and ssh
-        self.Vu = VectorFunctionSpace(msh, "DG", 1) # For velocity
-        self.x = SpatialCoordinate(msh)
+    def __init__(self, dt, mesh, t, bc='y', cg_deg=1, alpha=None):
+        self.Vdg = FunctionSpace(mesh, "DG", 1) # For potential vorticity and buoyancy and height
+        self.Vcg = FunctionSpace(mesh, "CG", cg_deg) # For streamfunction, bathymetry and ssh
+        self.Vu = VectorFunctionSpace(mesh, "DG", 1) # For velocity
+        self.x = SpatialCoordinate(mesh)
         self.dt = dt
-        self.facet_normal = FacetNormal(msh)
+        self.facet_normal = FacetNormal(mesh)
+        self.mesh = mesh
         
         self.time_length = t
         if (bc == 'y') or ( bc == 'x'):
@@ -92,7 +93,7 @@ class STQGSolver():
         self.Vcg = sw_params.Vcg
         self.Vu  = sw_params.Vu
 
-        self.psi0 = Function(self.Vcg, name="Streamfunction")  
+        self.psi0 = Function(self.Vcg, name="Streamfunction")
         self.ssh  = Function(self.Vcg, name="SSH")
 
         self.dq1  = Function(self.Vdg)  
@@ -103,6 +104,7 @@ class STQGSolver():
         self.b1  = Function(self.Vdg)
 
         self.Dt = sw_params.dt
+        self.mesh = sw_params.mesh
         dt      = Constant(self.Dt)
 
         psi = TrialFunction(self.Vcg)
@@ -174,11 +176,14 @@ class STQGSolver():
         self.solver_name = 'STRSW solver'
 
     def visualise_h5(self, h5_data_name_prefix,  output_visual_name, time_start=0, time_end=0, time_increment=0, initial_index=0):
-        output_file = File(output_visual_name + ".pvd") 
+        output_file = VTKFile(output_visual_name + ".pvd") 
         self.load_initial_conditions_from_file(f"{h5_data_name_prefix}_{initial_index}")
-        v = Function(VectorFunctionSpace(self.Vdg.mesh(),"CG", 1), name="Velocity")
-        v.project(self.gradperp(self.psi0))
-        self.ssh.assign(self.psi0 - 0.5 * Function(self.Vcg).project(self.initial_b))
+
+        Vu = VectorFunctionSpace(self.mesh, "CG",1)
+        Vcg = FunctionSpace(self.mesh, "CG",1)
+        v = Function(Vu, name="Velocity")
+        v.assign(project(self.gradperp(self.psi0),Vu))
+        self.ssh.assign(self.psi0 - 0.5 * project(self.initial_b, Vcg))
 
         output_file.write(self.initial_cond, self.psi0, v, self.initial_b, self.ssh, time=time_start)
 
@@ -186,8 +191,11 @@ class STQGSolver():
             initial_index += 1
             print(f"{h5_data_name_prefix}_{initial_index}", flush=True)
             self.load_initial_conditions_from_file(f"{h5_data_name_prefix}_{initial_index}")
-            v.project(self.gradperp(self.psi0))
-            self.ssh.assign(self.psi0 - 0.5 * Function(self.Vcg).project(self.initial_b))
+            Vu = VectorFunctionSpace(self.mesh, "CG",1)
+            Vcg = FunctionSpace(self.mesh, "CG",1)
+            v = Function(Vu, name="Velocity")
+            v.assign(project(self.gradperp(self.psi0),Vu))
+            self.ssh.assign(self.psi0 - 0.5 * project(self.initial_b, Vcg))
             output_file.write(self.initial_cond, self.psi0, v, self.initial_b, self.ssh, time=t)
 
     def animate(self, output_visual_name, save_name, scalar=None):
@@ -241,15 +249,27 @@ class STQGSolver():
         Loads pv, buoyancy and streamfunction
         """
         # PETSc.Sys.Print(norm(self.initial_cond))
-        with DumbCheckpoint(h5_data_name, mode=FILE_READ) as chk:
-            chk.load(self.initial_cond, name="PotentialVorticity")
-            chk.load(self.initial_b, name="Buoyancy")
-            chk.load(self.psi0, name="Streamfunction")
+        # with DumbCheckpoint(h5_data_name, mode=FILE_READ) as chk:
+        #     chk.load(self.initial_cond, name="PotentialVorticity")
+        #     chk.load(self.initial_b, name="Buoyancy")
+        #     chk.load(self.psi0, name="Streamfunction")
+        #     try:
+        #         chk.load(self.ssh, name="SSH")
+        #     except:
+        #         print('no ssh in data')
+        #         #pass
+
+        with CheckpointFile(f"{h5_data_name}.h5", "r") as chk:
+            self.mesh = chk.load_mesh("mesh")
+            self.initial_cond = chk.load_function(self.mesh, name="PotentialVorticity")
+            self.initial_b = chk.load_function(self.mesh, name="Buoyancy")
+            self.psi0 = chk.load_function(self.mesh, name="Streamfunction")
             try:
-                chk.load(self.ssh, name="SSH")
+                self.ssh = chk.load_function(self.mesh, name="SSH")
             except:
                 print('no ssh in data')
                 #pass
+
         # PETSc.Sys.Print(norm(self.initial_cond))
 
     def save_velocity_grid_data(self, h5_data_name, res):
@@ -267,15 +287,24 @@ class STQGSolver():
         """
         mesh_grid = tqg_mesh_grid(res)
         q0 = Function(self.Vdg)
-        with DumbCheckpoint(h5_data_name, mode=FILE_READ) as chk:
-            chk.load(q0, name="PotentialVorticity")
+        # with DumbCheckpoint(h5_data_name, mode=FILE_READ) as chk:
+        #     chk.load(q0, name="PotentialVorticity")
+
+        with CheckpointFile(f"{h5_data_name}.h5", "r") as chk:
+            mesh = chk.load_mesh("mesh")
+            q0 = chk.load_function(mesh, name="PotentialVorticity")
+
         v = Function(VectorFunctionSpace(self.Vdg.mesh(),"CG", 1), name="Velocity")
         self.q1.assign(q0)
         self.psi_solver.solve()
         v.project(self.gradperp(self.psi0))
         # PETSc.Sys.Print(norm(v), v.at([0.5, 0.5], tolerance=1e-10), flush=True)
         # PETSc.Sys.Print(h5_data_name)
-        return np.asarray(v.at(mesh_grid, tolerance=1e-10)) 
+
+        # Use PointEvaluator instead of deprecated Function.at
+        from firedrake import PointEvaluator
+        pe = PointEvaluator(v.function_space().mesh(), mesh_grid, tolerance=1e-10)
+        return pe.evaluate(v)
 
     def solve_for_streamfunction_data_from_file(self, h5_data_name):
         """
@@ -291,12 +320,24 @@ class STQGSolver():
         h5_data_name must end in '.h5'
         """
         q0 = Function(self.Vdg)
-        with DumbCheckpoint(h5_data_name, mode=FILE_READ) as chk:
-            chk.load(q0, name="PotentialVorticity")
+        # with DumbCheckpoint(h5_data_name, mode=FILE_READ) as chk:
+        #     chk.load(q0, name="PotentialVorticity")
+
+        with CheckpointFile(f"{h5_data_name}.h5", "r") as chk:
+            mesh = chk.load_mesh("mesh")
+            q0 = chk.load_function(mesh, name="PotentialVorticity")
+
         self.q1.assign(q0)
         self.psi_solver.solve()
 
-        return np.asarray(self.psi0.at(grid_point, tolerance=1e-10)) 
+
+
+        # Use PointEvaluator for single-point evaluation
+        from firedrake import PointEvaluator
+        pts = np.atleast_2d(grid_point)
+        pe = PointEvaluator(self.psi0.function_space().mesh(), pts, tolerance=1e-10)
+        vals = pe.evaluate(self.psi0)
+        return np.asarray(vals)[0]
 
     def solve(self, dumpfreq, output_name, data_output_name, comm_manager, do_save_data=False, do_save_visual=True, do_save_spectrum=False, res=0, zetas_file_name=None, xi_scaling=1, bathymetry_xi=False, procno=0, **kwargs):
         """
@@ -361,22 +402,28 @@ class STQGSolver():
             non_casimir_series.append(compute_non_casimir(q0, b0))
 
         # always create visual output and checkpoint (may raise if invalid paths)
-        output_file = File(output_name + ".pvd")
-        with DumbCheckpoint(data_output_name, single_file=False) as data_chk:
-            # write initial snapshot
-            output_file.write(q0, self.psi0, v, b0, self.ssh, time=0)
-            # store initial snapshot with explicit names
-            data_chk.store(q0, name="PotentialVorticity")
-            data_chk.store(b0, name="Buoyancy")
-            data_chk.store(self.psi0, name="Streamfunction")
-            data_chk.store(self.ssh, name="SSH")
+        output_file = VTKFile(output_name + ".pvd")
+        output_file.write(q0, self.psi0, v, b0, self.ssh, time=0)
+    
+        # store initial snapshot with explicit names
+        index = 0
+        spef_data_output_name = f"{data_output_name}_{index}.h5"
+        with CheckpointFile(spef_data_output_name, mode="w") as data_chk_alt:
+            data_chk_alt.save_mesh(self.mesh)
+            data_chk_alt.save_function(q0, name="PotentialVorticity")
+            data_chk_alt.save_function(b0, name="Buoyancy")
+            data_chk_alt.save_function(self.psi0, name="Streamfunction")
+            data_chk_alt.save_function(self.ssh, name="SSH")
+
+
+
+
         
         t = 0.
         T = self.time_length
         tdump = 0
 
         mesh_grid = tqg_mesh_grid(res)
-        index = 0
 
         from math import ceil
         iter_steps = ceil(T/Dt - 0.5) # number of while loop iterations
@@ -488,13 +535,21 @@ class STQGSolver():
                 output_file.write(q0, self.psi0, v, b0, self.ssh, time=_t)
                 # always save spectrum snapshot
                 index += 1
-                np.save(f"{data_output_name}_energy_{index}", np.asarray(v.at(mesh_grid, tolerance=1e-10)))
-                # always store checkpoint
-                data_chk.new_file()
-                data_chk.store(q0, name="PotentialVorticity")
-                data_chk.store(b0, name="Buoyancy")
-                data_chk.store(self.psi0, name="Streamfunction")
-                data_chk.store(self.ssh, name="SSH")
+
+                from firedrake import PointEvaluator
+                pe = PointEvaluator(v.function_space().mesh(), mesh_grid, tolerance=1e-10)
+                arr = pe.evaluate(v)
+
+
+                np.save(f"{data_output_name}_energy_{index}", arr)
+
+                spef_data_output_name = f"{data_output_name}_{index}.h5"
+                with CheckpointFile(spef_data_output_name, mode="w") as data_chk_alt:
+                    data_chk_alt.save_mesh(self.mesh)
+                    data_chk_alt.save_function(q0, name="PotentialVorticity")
+                    data_chk_alt.save_function(b0, name="Buoyancy")
+                    data_chk_alt.save_function(self.psi0, name="Streamfunction")
+                    data_chk_alt.save_function(self.ssh, name="SSH")
 
                 #PETSc.Sys.Print(_t,"/",T, " ", _te, _ke, _pe, flush=True)
         self.initial_cond.assign(q0)
@@ -513,8 +568,8 @@ if __name__ == "__main__":
     OMP_NUM_THREADS = 1
     if os.path.exists("./output"):
         shutil.rmtree("./output")
-    mesh = UnitSquareMesh(32, 32)
-    sw_params = SWParams(dt=0.01, msh=mesh, t=1, bc='y', cg_deg=1, alpha=0.1)
+    mesh = UnitSquareMesh(32, 32, name="mesh")
+    sw_params = SWParams(dt=0.01, mesh=mesh, t=1, bc='y', cg_deg=1, alpha=0.1)
     stqg_solver = STQGSolver(sw_params)
     stqg_solver.solve(dumpfreq=10, output_name="output/strsw_test", data_output_name="output/strsw_data_test", comm_manager=None, do_save_data=True, do_save_visual=True, do_save_spectrum=False, res=16)
     stqg_solver.visualise_h5(h5_data_name_prefix="output/strsw_data_test", output_visual_name="output/strsw_test_visual", time_start=0, time_end=1, time_increment=0.1, initial_index=0)
