@@ -1,7 +1,7 @@
 #
 # Author Wei Pan
 # Edited by Patrick Cahill
-# STQG solver
+# STRSW solver
 #
 
 
@@ -565,7 +565,6 @@ class STQGSolver():
         return noise
 
 if __name__ == "__main__":
-    OMP_NUM_THREADS = 1
     if os.path.exists("./output"):
         shutil.rmtree("./output")
     mesh = UnitSquareMesh(32, 32, name="mesh")
