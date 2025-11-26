@@ -1,3 +1,4 @@
 petsc/
 firedrake-configure
 venv/
+output/
