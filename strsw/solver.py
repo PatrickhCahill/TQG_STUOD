@@ -34,18 +34,20 @@ def tqg_mesh_grid(res):
     return np.asarray(mygrid) # now i have a list of grid values
 
 class SWParams():
-    """ firedrake finite element parameters """
-
-    def __init__(self, dt, mesh, t, bc='y', cg_deg=1, alpha=None):
-        self.Vdg = FunctionSpace(mesh, "DG", 1) # For potential vorticity and buoyancy and height
-        self.Vcg = FunctionSpace(mesh, "CG", cg_deg) # For streamfunction, bathymetry and ssh
-        self.Vu = VectorFunctionSpace(mesh, "DG", 1) # For velocity
+    def __init__(self, dt, mesh, t, bc='y'):
+        # Declare the function spaces
+        self.Vdg = FunctionSpace(mesh, "DG", 1) 
+        self.Vcg = FunctionSpace(mesh, "CG", 1) 
+        self.Vu = VectorFunctionSpace(mesh, "DG", 1)
+          
+        # Declare the necessary spatial coordinates and time parameters
         self.x = SpatialCoordinate(mesh)
-        self.dt = dt
+        self.dt = Constant(dt)
         self.facet_normal = FacetNormal(mesh)
         self.mesh = mesh
-        
         self.time_length = t
+
+        # Boundary conditions
         if (bc == 'y') or ( bc == 'x'):
             self.bcs = DirichletBC(self.Vcg, 0.0, 'on_boundary')
             self.dgbcs = DirichletBC(self.Vdg, 0.0, 'on_boundary')
@@ -53,21 +55,28 @@ class SWParams():
             self.bcs = []
             self.dgbcs =[]
 
+        # Declare the necessary initial condition functions
         self.initial_q = Function(self.Vdg, name="PotentialVorticity")
         self.initial_b = Function(self.Vdg, name="Buoyancy")
         self.bathymetry = Function(self.Vcg, name="Bathymetry")
-        self.rotation = Function(self.Vdg, name="Rotation")
-        self.alphasqr = Constant(1./alpha**2) if alpha != None else Constant(0)
+        self.f = Function(self.Vdg, name="Coriolis")
+
+        # Declare the constants
+        self.Ro = Constant(1.0)  # Rossby number
+        self.Fr = Constant(1.0)  # Froude number
+
+
+        # If there are any additional initialisations, do them in child classes
         super().__init__()
 
     def set_initial_conditions(self):
         x= SpatialCoordinate(self.Vdg.mesh())
         self.initial_q.interpolate( -exp(-5.0*(2*pi*x[1] - pi)**2) )
         self.bathymetry.interpolate( cos(2*pi*x[0]) + 0.5 * cos(4.0*pi * x[0]) + cos(6.0*pi*x[0])/3.0)
-        self.rotation.assign(0)
+        self.f.assign(0)
         self.initial_b.interpolate(sin(2*pi*x[0]))
 
-        return self.initial_q, self.initial_b, self.bathymetry, self.rotation
+        return self.initial_q, self.initial_b, self.bathymetry, self.f
 
     def set_forcing(self):
         return Function(self.Vdg).assign(0) 
@@ -76,70 +85,94 @@ class SWParams():
         return Constant(0.)
 
 class STQGSolver():
-
     def __init__(self, sw_params, bathymetry_xi_scaling=1.):
         self.id = 0
+        self.solver_name = 'STRSW solver'
 
-        #TQGSolver.__init__(self, tqg_params)
+        self.params = sw_params
+
+        # Define perpendicular gradient operator
         self.gradperp = lambda _u : as_vector((-_u.dx(1), _u.dx(0)))
-        
-        self.time_length = sw_params.time_length
 
-        #self.bathymetry is a CG function
-        self.initial_cond, self.initial_b, self.bathymetry, self.rotation  = sw_params.set_initial_conditions()
+        # Get the params from the sw_params object    
+        self.initial_cond, self.initial_b, self.bathymetry, self.f  = sw_params.set_initial_conditions()
         self.bathymetry_xi_scaling = bathymetry_xi_scaling
 
-        self.Vdg = sw_params.Vdg
-        self.Vcg = sw_params.Vcg
-        self.Vu  = sw_params.Vu
+        # Declare the functions to
+        self.u0 = Function(self.params.Vu, name="Velocity")
+        self.psi0 = Function(self.params.Vcg, name="Streamfunction")
+        # self.dpsi = Function(self.params.Vcg, name="Delta Streamfunction")
+        self.q0 = Function(self.params.Vdg, name="PotentialVorticity")
+        self.dq = Function(self.params.Vdg, name="Delta PotentialVorticity")
+        self.eta0 = Function(self.params.Vcg, name="eta")
+        self.deta = Function(self.params.Vcg, name="Delta eta")
+        self.b0 = Function(self.params.Vdg, name="Buoyancy")
+        self.db = Function(self.params.Vdg, name="Delta Buoyancy")
 
-        self.psi0 = Function(self.Vcg, name="Streamfunction")
-        self.ssh  = Function(self.Vcg, name="SSH")
 
-        self.dq1  = Function(self.Vdg)  
-        self.q1   = Function(self.Vdg)
+        psi = TrialFunction(self.params.Vcg)
+        db_trial = TrialFunction(self.params.Vdg)
+        dq_trial = TrialFunction(self.params.Vdg)
+        deta_trial = TrialFunction(self.params.Vcg)
+
+        phi_cg = TestFunction(self.params.Vcg)
+        phi_dg = TestFunction(self.params.Vdg)
         
-        self.db1 = Function(self.Vdg)  
-        self.db2 = Function(self.Vcg)
-        self.b1  = Function(self.Vdg)
-
-        self.Dt = sw_params.dt
-        self.mesh = sw_params.mesh
-        dt      = Constant(self.Dt)
-
-        psi = TrialFunction(self.Vcg)
-        phi = TestFunction(self.Vcg)
-
-        # --- elliptic equation ---
-        Apsi = (dot(grad(phi), grad(psi)) + phi * psi) * dx
-        Lpsi = (self.rotation - self.q1) * phi * dx 
-
-        psi_problem = LinearVariationalProblem(Apsi, Lpsi, self.psi0, sw_params.bcs)
+        
+        # Write the problems and solvers: psi
+        a_psi = phi_cg * psi * dx
+        L_psi = -dot(grad(phi_cg / self.eta0), grad(psi)) * dx + phi_cg * (1/self.eta0 * 1/self.Ro * self.f) * dx
+        psi_problem = LinearVariationalProblem(a_psi, L_psi, self.psi0, self.params.bcs)
         self.psi_solver = LinearVariationalSolver(psi_problem, \
             solver_parameters={
                 'ksp_type':'cg',
                 'pc_type':'sor'
             }
         )
+        
+        # Write the problems and solvers: q
+        a_q = phi_dg * dq_trial * dx
+        un = 0.5*(dot(self.gradperp(self.psi0), self.params.facet_normal) + abs(dot(self.gradperp(self.psi0), self.params.facet_normal)))
 
-        # --- b equation -----
-        un = 0.5 * (dot(self.gradperp(self.psi0), sw_params.facet_normal) \
-            + abs(dot(self.gradperp(self.psi0), sw_params.facet_normal)))
 
-        _un_ = dot(self.gradperp(self.psi0), sw_params.facet_normal)
-        _abs_un_ = abs(_un_)
+        L_q = self.params.dt * (
+            self.q0*div(phi_dg*self.gradperp(self.psi0))*dx                                                                                                                          \
+        #   - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) < 0, phi_dg*dot(self.gradperp(self.psi0), self.params.facet_normal)*u_in, 0.0)*ds # 0 because u_in = 0 in our case \
+          - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) > 0, phi_dg*dot(self.gradperp(self.psi0), self.params.facet_normal)*self.q0, 0.0)*ds                 \
+          - (phi_dg('+') - phi_dg('-'))*(un('+')*self.q0('+') - un('-')*self.q0('-'))*dS                                                                                             \
+          - phi_dg/(2*self.params.Fr**2) * (1/self.eta0) * nabla_div(self.eta0 * self.gradperp(db_trial))*dx
+          )
 
-        b = TrialFunction(self.Vdg)
-        p = TestFunction(self.Vdg)
-        a_mass_b = p * b * dx
-        a_int_b = (dot(grad(p), -self.gradperp(self.psi0) * b)) * dx
+        q_problem = LinearVariationalProblem(a_q, L_q, self.dq, bcs=sw_params.dgbcs)  # solve for dq1
+        self.q_solver = LinearVariationalSolver(q_problem, \
+            solver_parameters={
+            'ksp_type': 'preonly',
+            'pc_type': 'bjacobi',
+            'sub_pc_type': 'ilu'
+            }
+        )
 
-        a_flux_b =  0.5*jump(p)*(2*_un_('+')*avg(b) + _abs_un_('+')*jump(b))*dS  
+        # Write the problems and solvers: b
+        a_b = phi_dg * db_trial * dx
 
-        arhs_b = a_mass_b - dt * (a_int_b + a_flux_b)
+        # naive advection term (no upwinding)
+        # L_b = phi_dg * dot(self.gradperp(self.psi0) , grad(b)) * dx * dt
+        # replacing original tqg code with upwinding code from https://www.firedrakeproject.org/demos/DG_advection.py.html
 
-        b_problem = LinearVariationalProblem(a_mass_b, action(arhs_b, self.b1), self.db1 \
-                 , bcs=sw_params.dgbcs)  # solve for db1
+        # self.params.facet_normal is the inbuilt unit normal vector over exterior and interior facets
+        # un = \hat{u} \cdot \hat{n}. i.e component of velocity normal to facet
+        un = 0.5*(dot(self.gradperp(self.psi0), self.params.facet_normal) + abs(dot(self.gradperp(self.psi0), self.params.facet_normal)))
+        # Then perform integration by parts over the advection term to write as 4 integrals with 3 depending on the boundaries
+
+
+        L_b = self.params.dt * (
+            self.b0*div(phi_dg*self.gradperp(self.psi0))*dx                                                                                                                          \
+        #   - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) < 0, phi_dg*dot(self.gradperp(self.psi0), self.params.facet_normal)*u_in, 0.0)*ds # 0 because u_in = 0 in our case \
+          - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) > 0, phi_dg*dot(self.gradperp(self.psi0), self.params.facet_normal)*self.b0, 0.0)*ds                 \
+          - (phi_dg('+') - phi_dg('-'))*(un('+')*self.b0('+') - un('-')*self.b0('-'))*dS)                                                                                            
+
+
+        b_problem = LinearVariationalProblem(a_b, L_b, self.db, bcs=sw_params.dgbcs)  # solve for db1
         self.b_solver = LinearVariationalSolver(b_problem, \
             solver_parameters={
             'ksp_type': 'preonly',
@@ -148,32 +181,27 @@ class STQGSolver():
             }
         )
 
-        # --- q equation -----
-        q = TrialFunction(self.Vdg)
-        p_ = TestFunction(self.Vdg)
-        a_mass_ = p_ * q * dx
-
-        a_int_ = ( dot(grad(p_), -self.gradperp(self.psi0)*(q - self.db1))
-                  + p_ * div(self.db2 * self.gradperp(0.5*self.bathymetry)) ) *dx
-
-        a_flux_ =  0.5*jump(p_)*(2*_un_('+')*avg(q-self.db1) + _abs_un_('+')*jump(q - self.db1))*dS  
-
-        arhs_ = a_mass_ - dt * (a_int_ + a_flux_ )
-
-        q_problem = LinearVariationalProblem(a_mass_, action(arhs_, self.q1), self.dq1)  # solve for dq1
-
-        self.q_solver = LinearVariationalSolver(q_problem, 
+        # Write the porblems and solvers: eta
+        a_eta = phi_dg * deta_trial * dx
+        # naive mass conservation (no upwinding)
+        # L_eta = phi_dg * nabla_div(self.gradperp(self.psi0) * self.eta0) * dx
+        # above code is upwinding for advection equation. now we do upwinding for mass conservation equation
+        un = 0.5*(dot(self.gradperp(self.psi0), self.params.facet_normal) + abs(dot(self.gradperp(self.psi0), self.params.facet_normal)))
+        L_eta = self.params.dt * (
+            dot(self.eta0 * self.gradperp(self.psi0), grad(phi_dg)) * dx                                                                                                                   \
+        #   - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) < 0, phi_dg*dot(self.gradperp(self.psi0), self.params.facet_normal)*u_in, 0.0)*ds # 0 because u_in = 0 in our case \
+          - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) > 0, phi_dg*dot(self.gradperp(self.psi0), self.params.facet_normal)*self.eta0, 0.0)*ds                 \
+          - (phi_dg('+') - phi_dg('-'))*(un('+')*self.eta0('+') - un('-')*self.eta0('-'))*dS                                                                                             \
+          )
+        
+        eta_problem = LinearVariationalProblem(a_eta, L_eta, self.deta, bcs=sw_params.dgbcs)
+        self.eta_solver = LinearVariationalSolver(eta_problem, \
             solver_parameters={
             'ksp_type': 'preonly',
             'pc_type': 'bjacobi',
             'sub_pc_type': 'ilu'
             }
         )
-        
-        # ----- vertex based limiter -------
-        self.x = sw_params.x
-        self.Vcg = sw_params.Vcg
-        self.solver_name = 'STRSW solver'
 
     def visualise_h5(self, h5_data_name_prefix,  output_visual_name, time_start=0, time_end=0, time_increment=0, initial_index=0):
         output_file = VTKFile(output_visual_name + ".pvd") 
