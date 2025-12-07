@@ -2,3 +2,13 @@ petsc/
 firedrake-configure
 venv/
 output/
+discontinuous_galerkin.ipynb
+nitsche_penalty.ipynb
+workspace.ipynb
+__pycache__/
+.DS_Store
+*.pyc
+*.pyo
+*.pyd
+.ipynb_checkpoints/
+.vscode/
