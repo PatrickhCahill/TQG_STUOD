@@ -40,7 +40,7 @@ def tqg_mesh_grid(res):
     return np.asarray(mygrid) # now i have a list of grid values
 
 class STRSWParams():
-    def __init__(self, dt, mesh, t, bc='y'):
+    def __init__(self, dt, mesh, t, bc='y', dumpfreq=10):
         # Declare the function spaces
         self.Vdg = FunctionSpace(mesh, "DG", 1) 
         self.Vcg = FunctionSpace(mesh, "CG", 1) 
@@ -52,6 +52,7 @@ class STRSWParams():
         self.facet_normal = FacetNormal(mesh)
         self.mesh = mesh
         self.time_length = t
+        self.dumpfreq = dumpfreq
 
         # Boundary conditions
         if (bc == 'y') or ( bc == 'x'):
@@ -143,7 +144,7 @@ class STRSWSolver():
         un = 0.5*(dot(self.gradperp(self.psi0), self.params.facet_normal) + abs(dot(self.gradperp(self.psi0), self.params.facet_normal)))
 
 
-        L_q = self.params.dt * (
+        L_q = phi_dg * self.q1 * dx + self.params.dt * (
             self.q1*div(phi_dg*self.gradperp(self.psi0))*dx                                                                                                                          \
         #   - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) < 0, phi_dg*dot(self.gradperp(self.psi0), self.params.facet_normal)*u_in, 0.0)*ds # 0 because u_in = 0 in our case \
           - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) > 0, phi_dg*dot(self.gradperp(self.psi0), self.params.facet_normal)*self.q1, 0.0)*ds                 \
@@ -173,7 +174,7 @@ class STRSWSolver():
         # Then perform integration by parts over the advection term to write as 4 integrals with 3 depending on the boundaries
 
 
-        L_b = self.params.dt * (
+        L_b =  phi_dg * self.b1 * dx + self.params.dt * (
             self.b1*div(phi_dg*self.gradperp(self.psi0))*dx                                                                                                                          \
         #   - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) < 0, phi_dg*dot(self.gradperp(self.psi0), self.params.facet_normal)*u_in, 0.0)*ds # 0 because u_in = 0 in our case \
           - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) > 0, phi_dg*dot(self.gradperp(self.psi0), self.params.facet_normal)*self.b1, 0.0)*ds                 \
@@ -208,9 +209,9 @@ class STRSWSolver():
                 'ksp_type':'cg',
                 'pc_type':'sor'
             }
-        )
+            )
 
-    def visualise_h5(self, h5_data_name_prefix,  output_visual_name, time_start=0, time_end=0, time_increment=0, initial_index=0):
+    def visualise_h5(self, sw_params, h5_data_name_prefix,  output_visual_name, time_start=0, time_end=0, time_increment=0, initial_index=0):
         output_file = VTKFile(output_visual_name + ".pvd") 
         self.load_initial_conditions_from_file(f"{h5_data_name_prefix}_{initial_index}")
 
@@ -218,9 +219,8 @@ class STRSWSolver():
         Vcg = FunctionSpace(self.mesh, "CG",1)
         v = Function(Vu, name="Velocity")
         v.assign(project(self.gradperp(self.psi0),Vu))
-        self.ssh.assign(self.psi0 - 0.5 * project(self.initial_b, Vcg))
 
-        output_file.write(self.initial_cond, self.psi0, v, self.initial_b, self.ssh, time=time_start)
+        output_file.write(self.initial_q, self.psi0, v, self.initial_b, self.initial_eta, time=time_start)
 
         for t in np.arange(time_increment, time_end, time_increment):
             initial_index += 1
@@ -230,10 +230,9 @@ class STRSWSolver():
             Vcg = FunctionSpace(self.mesh, "CG",1)
             v = Function(Vu, name="Velocity")
             v.assign(project(self.gradperp(self.psi0),Vu))
-            self.ssh.assign(self.psi0 - 0.5 * project(self.initial_b, Vcg))
-            output_file.write(self.initial_cond, self.psi0, v, self.initial_b, self.ssh, time=t)
+            output_file.write(self.initial_q, self.psi0, v, self.initial_b, self.initial_eta, time=t)
 
-    def animate(self, output_visual_name, save_name, scalar=None):
+    def animate(self, sw_params, output_visual_name, save_name, scalar=None):
         import pyvista as pv
         import matplotlib.pyplot as plt
         from matplotlib.animation import FuncAnimation
@@ -247,7 +246,7 @@ class STRSWSolver():
 
         images = []  # will store arrays for Matplotlib
 
-        for fp in filepaths:
+        for i,fp in enumerate(filepaths):
             mesh = pv.read(fp)
 
             plotter = pv.Plotter(off_screen=True)
@@ -257,9 +256,11 @@ class STRSWSolver():
                 plotter.add_mesh(mesh, cmap="viridis")
 
             plotter.camera_position = "iso"
-            
+
+            plotter.add_title(f"{scalar} at time {(i * sw_params.dt.dat.data[0] * sw_params.dumpfreq):.2f}", font_size=10)
             # Returns an RGBA numpy array
             img = plotter.screenshot(return_img=True)
+
             images.append(img)
 
             plotter.close()
@@ -287,11 +288,10 @@ class STRSWSolver():
 
         with CheckpointFile(f"{h5_data_name}.h5", "r") as chk:
             self.mesh = chk.load_mesh("mesh")
-            self.initial_cond = chk.load_function(self.mesh, name="PotentialVorticity")
-            self.initial_b = chk.load_function(self.mesh, name="Buoyancy")
             self.psi0 = chk.load_function(self.mesh, name="Streamfunction")
-            self.ssh = chk.load_function(self.mesh, name="SSH")
-
+            self.initial_q = chk.load_function(self.mesh, name="PotentialVorticity")
+            self.initial_b = chk.load_function(self.mesh, name="Buoyancy")
+            self.initial_eta = chk.load_function(self.mesh, name="Eta")
 
     def save_velocity_grid_data(self, h5_data_name, res):
         """
@@ -331,7 +331,7 @@ class STRSWSolver():
         Load h5 data, and solve for stream function
         """
         self.load_initial_conditions_from_file(h5_data_name)
-        self.q1.assign(self.initial_cond)
+        self.q1.assign(self.initial_q)
         self.psi_solver.solve()
 
     def get_streamfunction_grid_data(self, h5_data_name, grid_point):
@@ -359,7 +359,7 @@ class STRSWSolver():
         vals = pe.evaluate(self.psi0)
         return np.asarray(vals)[0]
 
-    def solve(self, dumpfreq, output_name, data_output_name, comm_manager, do_save_data=False, do_save_visual=True, do_save_spectrum=False, res=0, zetas_file_name=None, xi_scaling=1, bathymetry_xi=False, procno=0, **kwargs):
+    def solve(self, output_name, data_output_name, comm_manager, do_save_data=False, do_save_visual=True, do_save_spectrum=False, res=0, zetas_file_name=None, xi_scaling=1, bathymetry_xi=False, procno=0, **kwargs):
         """
         solve the STQG system given initial condition q0
 
@@ -414,7 +414,7 @@ class STRSWSolver():
             data_chk.save_mesh(self.params.mesh)
             data_chk.save_function(q0, name="PotentialVorticity")
             data_chk.save_function(b0, name="Buoyancy")
-            data_chk.save_function(eta0, name="eta")
+            data_chk.save_function(eta0, name="Eta")
             data_chk.save_function(self.psi0, name="Streamfunction")
 
 
@@ -508,8 +508,8 @@ class STRSWSolver():
             # Store solutions to xml and pvd
             # t += Dt
             tdump += 1
-            if tdump == dumpfreq:
-                tdump -= dumpfreq
+            if tdump == self.params.dumpfreq:
+                tdump -= self.params.dumpfreq
                 _t = round(t, 5)
                 _ke, _pe, _te = 0, 0, 0 
                 # always update solver state and save outputs
@@ -537,7 +537,7 @@ class STRSWSolver():
                     data_chk.save_function(q0, name="PotentialVorticity")
                     data_chk.save_function(b0, name="Buoyancy")
                     data_chk.save_function(self.psi0, name="Streamfunction")
-                    data_chk.save_function(eta0, name="eta")
+                    data_chk.save_function(eta0, name="Eta")
 
         self.initial_q.assign(q0)
         self.initial_b.assign(b0)
@@ -550,12 +550,17 @@ class STRSWSolver():
 if __name__ == "__main__":
     if os.path.exists("./output"):
         shutil.rmtree("./output")
-    mesh = UnitSquareMesh(32, 32, name="mesh")
-    sw_params = STRSWParams(dt=0.01, mesh=mesh, t=1, bc='y')
+    res = 32
+    mesh = UnitSquareMesh(res, res, name="mesh")
+    T = 1
+    dt = 0.01
+    dumpfreq=10
+    time_increment = dt * dumpfreq
+    sw_params = STRSWParams(dt=dt, mesh=mesh, t=T, bc='y', dumpfreq=dumpfreq)
     stqg_solver = STRSWSolver(sw_params)
-    stqg_solver.solve(dumpfreq=10, output_name="output/strsw_test", data_output_name="output/strsw_data_test", comm_manager=None, do_save_data=True, do_save_visual=True, do_save_spectrum=False, res=16)
-    stqg_solver.visualise_h5(h5_data_name_prefix="output/strsw_data_test", output_visual_name="output/strsw_test_visual", time_start=0, time_end=1, time_increment=0.1, initial_index=0)
-    stqg_solver.animate("output/strsw_test_visual", "vorticity_anim", "PotentialVorticity")
-    stqg_solver.animate("output/strsw_test_visual", "ssh_anim", "SSH")
-    stqg_solver.animate("output/strsw_test_visual", "buoyancy_anim", "Buoyancy")
-    stqg_solver.animate("output/strsw_test_visual", "streamfunction_anim", "Streamfunction")
+    stqg_solver.solve(output_name="output/strsw_test", data_output_name="output/strsw_data_test", comm_manager=None, do_save_data=True, do_save_visual=True, do_save_spectrum=False, res=res)
+    stqg_solver.visualise_h5(sw_params, h5_data_name_prefix="output/strsw_data_test", output_visual_name="output/strsw_test_visual", time_start=0, time_end=T, time_increment=time_increment, initial_index=0)
+    stqg_solver.animate(sw_params, "output/strsw_test_visual", "vorticity_anim", "PotentialVorticity")
+    stqg_solver.animate(sw_params, "output/strsw_test_visual", "eta_anim", "Eta")
+    stqg_solver.animate(sw_params, "output/strsw_test_visual", "buoyancy_anim", "Buoyancy")
+    stqg_solver.animate(sw_params, "output/strsw_test_visual", "streamfunction_anim", "Streamfunction")
