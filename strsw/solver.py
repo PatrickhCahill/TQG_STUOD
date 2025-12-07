@@ -39,6 +39,9 @@ def tqg_mesh_grid(res):
             mygrid.append([xx[i], yy[j]])
     return np.asarray(mygrid) # now i have a list of grid values
 
+
+
+
 class STRSWParams():
     def __init__(self, dt, mesh, t, bc='y', dumpfreq=10):
         # Declare the function spaces
@@ -94,8 +97,10 @@ class STRSWParams():
     def set_damping_rate(self):
         return Constant(0.)
 
+
+
 class STRSWSolver():
-    def __init__(self, sw_params, bathymetry_xi_scaling=1.):
+    def __init__(self, sw_params):
         self.id = 0
         self.solver_name = 'STRSW solver'
 
@@ -211,12 +216,20 @@ class STRSWSolver():
             }
             )
 
+    def cfl(self):
+        Vu = VectorFunctionSpace(self.params.mesh, "CG",1)
+        v = Function(Vu, name="Velocity")
+        v.assign(project(self.gradperp(self.psi0),Vu))
+
+        u_magnitude = np.sqrt(((v.dat.data[:])**2).max())
+        local_cfl = u_magnitude * self.params.dt.dat.data[0] / self.params.mesh.cell_sizes.dat.data.min()
+        return local_cfl
+
     def visualise_h5(self, sw_params, h5_data_name_prefix,  output_visual_name, time_start=0, time_end=0, time_increment=0, initial_index=0):
         output_file = VTKFile(output_visual_name + ".pvd") 
         self.load_initial_conditions_from_file(f"{h5_data_name_prefix}_{initial_index}")
 
         Vu = VectorFunctionSpace(self.mesh, "CG",1)
-        Vcg = FunctionSpace(self.mesh, "CG",1)
         v = Function(Vu, name="Velocity")
         v.assign(project(self.gradperp(self.psi0),Vu))
 
@@ -334,6 +347,10 @@ class STRSWSolver():
         self.q1.assign(self.initial_q)
         self.psi_solver.solve()
 
+    def clear_data(self):
+        if os.path.exists("./output"):
+            shutil.rmtree("./output")
+
     def get_streamfunction_grid_data(self, h5_data_name, grid_point):
         """
         Takes checkpoint data (pv, buoyancy) and save corresponding streamfunction grid values for autocorrelation analysis
@@ -359,7 +376,7 @@ class STRSWSolver():
         vals = pe.evaluate(self.psi0)
         return np.asarray(vals)[0]
 
-    def solve(self, output_name, data_output_name, comm_manager, do_save_data=False, do_save_visual=True, do_save_spectrum=False, res=0, zetas_file_name=None, xi_scaling=1, bathymetry_xi=False, procno=0, **kwargs):
+    def solve(self, output_name, data_output_name, res, zetas_file_name=None, **kwargs):
         """
         solve the STQG system given initial condition q0
 
@@ -430,24 +447,22 @@ class STRSWSolver():
         psi0_perturbation = 0 
         bms = None
         
-        if (zetas_file_name is not None) and (bathymetry_xi is False):
-            zetas = xi_scaling * np.load(zetas_file_name)
+        if (zetas_file_name is not None):
+            zetas = np.load(zetas_file_name)
         else:
-            if bathymetry_xi is True:
-                zetas = xi_scaling * np.asarray([self.bathymetry.dat.data]) 
-            else:
-                zetas = np.asarray([Function(self.params.Vcg).dat.data])
+            zetas = np.asarray([Function(self.params.Vcg).dat.data])
         
         if 'proposal_step' in kwargs and 'state_store' in kwargs:
             noise = rho * state_store + np.sqrt((1. - rho**2) /self.params.dt) * np.random.normal(0, 1, zetas.shape[0] * iter_steps)
         else:
-            noise = np.sqrt(self.params.dt)**(-1) * np.random.normal(0., 1., zetas.shape[0] * iter_steps) if ((zetas_file_name is not None) or (bathymetry_xi is True)) else np.zeros(zetas.shape[0] *  iter_steps)
+            noise = np.sqrt(self.params.dt)**(-1) * np.random.normal(0., 1., zetas.shape[0] * iter_steps) if (zetas_file_name is not None) else np.zeros(zetas.shape[0] *  iter_steps)
             print_debug(f"Noise shape: {noise.shape}, Psi0 shape: {np.asarray(self.psi0.dat.data).shape}")
 
 
 
         step = 0
         for t in tqdm(np.arange(t,T,self.params.dt)):
+            print(self.cfl())
             # sort out BM
             if self.solver_name == 'STRSW solver':
                 bms = noise[step:step+zetas.shape[0]]
@@ -548,17 +563,18 @@ class STRSWSolver():
 
 
 if __name__ == "__main__":
-    if os.path.exists("./output"):
-        shutil.rmtree("./output")
-    res = 32
+    res = 64
     mesh = UnitSquareMesh(res, res, name="mesh")
+
+
     T = 1
     dt = 0.01
     dumpfreq=10
     time_increment = dt * dumpfreq
     sw_params = STRSWParams(dt=dt, mesh=mesh, t=T, bc='y', dumpfreq=dumpfreq)
     stqg_solver = STRSWSolver(sw_params)
-    stqg_solver.solve(output_name="output/strsw_test", data_output_name="output/strsw_data_test", comm_manager=None, do_save_data=True, do_save_visual=True, do_save_spectrum=False, res=res)
+    stqg_solver.clear_data()
+    stqg_solver.solve(output_name="output/strsw_test", data_output_name="output/strsw_data_test", res=res)
     stqg_solver.visualise_h5(sw_params, h5_data_name_prefix="output/strsw_data_test", output_visual_name="output/strsw_test_visual", time_start=0, time_end=T, time_increment=time_increment, initial_index=0)
     stqg_solver.animate(sw_params, "output/strsw_test_visual", "vorticity_anim", "PotentialVorticity")
     stqg_solver.animate(sw_params, "output/strsw_test_visual", "eta_anim", "Eta")
