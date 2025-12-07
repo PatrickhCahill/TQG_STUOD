@@ -191,12 +191,12 @@ class STQGSolver():
         # L_eta = phi_dg * nabla_div(self.gradperp(self.psi0) * self.eta0) * dx
         # above code is upwinding for advection equation. now we do upwinding for mass conservation equation
         un = 0.5*(dot(self.gradperp(self.psi0), self.params.facet_normal) + abs(dot(self.gradperp(self.psi0), self.params.facet_normal)))
-        L_eta = self.params.dt * (
-            dot(self.eta1 * self.gradperp(self.psi0), grad(phi_cg)) * dx                                                                                                                   \
-        #   - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) < 0, phi_dg*dot(self.gradperp(self.psi0), self.params.facet_normal)*u_in, 0.0)*ds # 0 because u_in = 0 in our case \
-          - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) > 0, phi_cg*dot(self.gradperp(self.psi0), self.params.facet_normal)*self.eta1, 0.0)*ds                 \
-          - (phi_cg('+') - phi_cg('-'))*(un('+')*self.eta1('+') - un('-')*self.eta1('-'))*dS                                                                                             \
-          )
+
+        adv_eta = dot(self.eta1 * self.gradperp(self.psi0), grad(phi_cg)) * dx \
+            - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) > 0,
+                      phi_cg*dot(self.gradperp(self.psi0), self.params.facet_normal)*self.eta1, 0.0) * ds
+        L_eta = phi_cg * self.eta1 * dx - self.params.dt * adv_eta
+
         
         eta_problem = LinearVariationalProblem(a_eta, L_eta, self.eta_placeholder, bcs=self.params.bc_eta)
         self.eta_solver = LinearVariationalSolver(eta_problem, \
