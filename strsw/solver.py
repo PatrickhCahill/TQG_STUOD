@@ -35,7 +35,7 @@ def tqg_mesh_grid(res):
             mygrid.append([xx[i], yy[j]])
     return np.asarray(mygrid) # now i have a list of grid values
 
-class SWParams():
+class STRSWParams():
     def __init__(self, dt, mesh, t, bc='y'):
         # Declare the function spaces
         self.Vdg = FunctionSpace(mesh, "DG", 1) 
@@ -89,7 +89,7 @@ class SWParams():
     def set_damping_rate(self):
         return Constant(0.)
 
-class STQGSolver():
+class STRSWSolver():
     def __init__(self, sw_params, bathymetry_xi_scaling=1.):
         self.id = 0
         self.solver_name = 'STRSW solver'
@@ -545,241 +545,16 @@ class STQGSolver():
 
                 spef_data_output_name = f"{data_output_name}_{index}.h5"
                 with CheckpointFile(spef_data_output_name, mode="w") as data_chk:
-                    data_chk.save_mesh(self.mesh)
+                    data_chk.save_mesh(self.params.mesh)
                     data_chk.save_function(q0, name="PotentialVorticity")
                     data_chk.save_function(b0, name="Buoyancy")
                     data_chk.save_function(self.psi0, name="Streamfunction")
                     data_chk.save_function(eta0, name="eta")
 
                 #PETSc.Sys.Print(_t,"/",T, " ", _te, _ke, _pe, flush=True)
-        self.initial_cond.assign(q0)
+        self.initial_q.assign(q0)
         self.initial_b.assign(b0)
-
-        # close checkpoint if opened
-        try:
-            if data_chk is not None:
-                data_chk.close()
-        except Exception:
-            pass
-
-        return noise
-
-
-
-    def solve_depr(self, dumpfreq, output_name, data_output_name, comm_manager, do_save_data=False, do_save_visual=True, do_save_spectrum=False, res=0, zetas_file_name=None, xi_scaling=1, bathymetry_xi=False, procno=0, **kwargs):
-        """
-        solve the STQG system given initial condition q0
-
-        :param dumpfreq:
-        :param _q0:
-        :param output_name: name of output files, stored in utility.output_directory
-        :param output_visual_flag: if True, this function will output pvd files for visualisation at a frequency
-        defined by dumpfreq
-        :param chkpt_flag: if True, this function will store solved q as chkpoint file at solution times defined by
-         dumpfreq
-        :param zetas_file_name: numpy file name
-        :return: 
-        """
-        PETSc.Sys.Print(self.solver_name,flush=True)
-        
-        # assume q0 is given in initial_cond
-        q0 = Function(self.Vdg)
-        b0 = Function(self.Vdg)
-        q0.assign(self.initial_cond)
-        b0.assign(self.initial_b)
-        
-
-        Vu = self.Vu
-        Dt = self.Dt
-
-        q0.rename("PotentialVorticity")
-        self.psi0.rename("Streamfunction")
-        b0.rename("Buoyancy")
-        v = Function(Vu, name="Velocity")
-        
-        self.q1.assign(q0)
-        self.psi_solver.solve()
-        v.project(self.gradperp(self.psi0))
-        self.ssh.assign(self.psi0 - 0.5 * Function(self.Vcg).project(b0))
-        
-        output_file = None
-        data_chk = None
-        
-        compute_kinetic_energy = lambda _w, _psi, _f : assemble( -0.5 * _psi * (_w - _f ) *dx )
-        compute_potential_energy = lambda _h, _b : assemble( -0.5* _h * _b * dx)
-        compute_total_energy = lambda _w, _psi, _f, _h, _b : assemble( -0.5 * (_psi*(_w-_f) + _h*_b ) *dx ) 
-        compute_casimir = lambda _w, _b : assemble( (_b + _w*_b)*dx )
-        compute_non_casimir = lambda _w, _b : assemble( (_b + _w*_w*_b) *dx )
-
-        kinetic_energy_series = []
-        potential_energy_series = []
-        total_energy_series = []
-        casimir_series = []
-        non_casimir_series = []
-
-        # Always compute initial energies if appropriate and always open outputs
-        if self.solver_name == 'TQG solver':
-            _ke = compute_kinetic_energy(q0, self.psi0, self.rotation)
-            _pe = compute_potential_energy(self.bathymetry, b0)
-            _te = compute_total_energy(q0, self.psi0, self.rotation, self.bathymetry, b0)
-            kinetic_energy_series.append(_ke)
-            potential_energy_series.append(_pe)
-            total_energy_series.append(_te)
-            casimir_series.append(compute_casimir(q0, b0))
-            non_casimir_series.append(compute_non_casimir(q0, b0))
-
-        # always create visual output and checkpoint (may raise if invalid paths)
-        output_file = VTKFile(output_name + ".pvd")
-        output_file.write(q0, self.psi0, v, b0, self.ssh, time=0)
-    
-        # store initial snapshot with explicit names
-        index = 0
-        spef_data_output_name = f"{data_output_name}_{index}.h5"
-        with CheckpointFile(spef_data_output_name, mode="w") as data_chk_alt:
-            data_chk_alt.save_mesh(self.mesh)
-            data_chk_alt.save_function(q0, name="PotentialVorticity")
-            data_chk_alt.save_function(b0, name="Buoyancy")
-            data_chk_alt.save_function(self.psi0, name="Streamfunction")
-            data_chk_alt.save_function(self.ssh, name="SSH")
-
-
-
-
-        
-        t = 0.
-        T = self.time_length
-        tdump = 0
-
-        mesh_grid = tqg_mesh_grid(res)
-
-        from math import ceil
-        iter_steps = ceil(T/Dt - 0.5) # number of while loop iterations
-        # zetas are EOFs and should be of the shape psi.dat.data[:]
-
-        np.random.seed(None)
-        rho = kwargs.get('proposal_step')
-        state_store = kwargs.get('state_store')
-        
-
-        zetas = None
-        noise = None
-        psi0_perturbation = 0 
-        bms = None
-        if self.solver_name == 'STQG solver':
-            #print(zetas_file_name)
-            #zetas = xi_scaling * np.load(zetas_file_name) if zetas_file_name is not None else  np.asarray([Function(self.Vcg).dat.data])
-
-            if (zetas_file_name is not None) and (bathymetry_xi is False):
-                #print('zeta is from file', flush=True)
-                zetas = xi_scaling * np.load(zetas_file_name)
-            else:
-                if bathymetry_xi is True:
-                    #print('zetas = bathymetry', flush=True)
-                    zetas = xi_scaling * np.asarray([self.bathymetry.dat.data]) 
-                else:
-                    #print('no zeta', flush=True)
-                    zetas = np.asarray([Function(self.Vcg).dat.data])
-            #print(zetas.shape)
-            #Function(self.Vcg)
-            #zetas = np.asarray([zeta.dat.data])  
-
-            if 'proposal_step' in kwargs and 'state_store' in kwargs:
-                noise = rho * state_store + np.sqrt((1. - rho**2) /Dt) * np.random.normal(0, 1, zetas.shape[0] * iter_steps)
-                
-            else:
-                noise = np.sqrt(self.params.dt)**(-1) * np.random.normal(0., 1., zetas.shape[0] * iter_steps) if ((zetas_file_name is not None) or (bathymetry_xi is True)) else np.zeros(zetas.shape[0] *  iter_steps)
-                #print(noise, flush=True)
-            #print(noise.shape, np.asarray(self.psi0.dat.data).shape)
-
-        step = 0
-        for t in tqdm(np.arange(t,T,self.params.dt)):
-            # sort out BM
-            if self.solver_name == 'STQG solver':
-                bms = noise[step:step+zetas.shape[0]]
-                step += zetas.shape[0]
-
-            # Compute the streamfunction for the known value of q0
-            self.b1.assign(b0)
-            self.q1.assign(q0)
-            self.db2.project(b0)
-
-            self.psi_solver.solve()
-            psi0_perturbation = 0 if zetas is None else np.sum((zetas.T * bms).T, axis=0) 
-            #print(psi0_perturbation, flush=True)
-            
-            self.psi0.dat.data[:] += psi0_perturbation
-            self.b_solver.solve()
-            self.q_solver.solve()     
-
-            # # Find intermediate solution q^(1)
-            self.b1.assign(self.db1)
-            self.q1.assign(self.dq1)
-            self.db2.project(self.b1)
-            
-            self.psi_solver.solve()
-            self.psi0.dat.data[:] += psi0_perturbation
-            self.b_solver.solve()
-            self.q_solver.solve()
-
-            # # Find intermediate solution q^(2)
-            self.b1.assign(0.75 * b0 + 0.25 * self.db1)
-            self.q1.assign(0.75 * q0 + 0.25 * self.dq1)
-            self.db2.project(self.b1)
-
-            self.psi_solver.solve()
-            self.psi0.dat.data[:] += psi0_perturbation
-            self.b_solver.solve()
-            self.q_solver.solve()
-
-            # # Find new solution q^(n+1)
-            b0.assign(b0 / 3 + 2 * self.db1 / 3)
-            q0.assign(q0 / 3 + 2 * self.dq1 / 3)
-
-            # Store solutions to xml and pvd
-            # t += Dt
-            tdump += 1
-            if tdump == dumpfreq:
-                tdump -= dumpfreq
-                _t = round(t, 5)
-                _ke, _pe, _te = 0, 0, 0 
-                # always update solver state and save outputs
-                self.q1.assign(q0)
-                self.psi_solver.solve()
-                v.project(self.gradperp(self.psi0))
-                self.ssh.assign(self.psi0 - 0.5 * Function(self.Vcg).project(b0))
-
-                if self.solver_name == 'TQG solver':
-                    _ke = compute_kinetic_energy(q0, self.psi0, self.rotation)
-                    _pe = compute_potential_energy(self.bathymetry, b0)
-                    _te = compute_total_energy(q0, self.psi0, self.rotation, self.bathymetry, b0)
-                    kinetic_energy_series.append(_ke)
-                    potential_energy_series.append(_pe)
-                    total_energy_series.append(_te)
-                    non_casimir_series.append(compute_non_casimir(q0, b0))
-
-                # always write visualisation
-                output_file.write(q0, self.psi0, v, b0, self.ssh, time=_t)
-                # always save spectrum snapshot
-                index += 1
-
-                from firedrake import PointEvaluator
-                pe = PointEvaluator(v.function_space().mesh(), mesh_grid, tolerance=1e-10)
-                arr = pe.evaluate(v)
-
-
-                np.save(f"{data_output_name}_energy_{index}", arr)
-
-                spef_data_output_name = f"{data_output_name}_{index}.h5"
-                with CheckpointFile(spef_data_output_name, mode="w") as data_chk_alt:
-                    data_chk_alt.save_mesh(self.mesh)
-                    data_chk_alt.save_function(q0, name="PotentialVorticity")
-                    data_chk_alt.save_function(b0, name="Buoyancy")
-                    data_chk_alt.save_function(self.psi0, name="Streamfunction")
-                    data_chk_alt.save_function(self.ssh, name="SSH")
-
-                #PETSc.Sys.Print(_t,"/",T, " ", _te, _ke, _pe, flush=True)
-        self.initial_cond.assign(q0)
-        self.initial_b.assign(b0)
+        self.initial_eta.assign(eta0)
 
         # close checkpoint if opened
         try:
@@ -795,8 +570,8 @@ if __name__ == "__main__":
     if os.path.exists("./output"):
         shutil.rmtree("./output")
     mesh = UnitSquareMesh(32, 32, name="mesh")
-    sw_params = SWParams(dt=0.01, mesh=mesh, t=1, bc='y')
-    stqg_solver = STQGSolver(sw_params)
+    sw_params = STRSWParams(dt=0.01, mesh=mesh, t=1, bc='y')
+    stqg_solver = STRSWSolver(sw_params)
     stqg_solver.solve(dumpfreq=10, output_name="output/strsw_test", data_output_name="output/strsw_data_test", comm_manager=None, do_save_data=True, do_save_visual=True, do_save_spectrum=False, res=16)
     stqg_solver.visualise_h5(h5_data_name_prefix="output/strsw_data_test", output_visual_name="output/strsw_test_visual", time_start=0, time_end=1, time_increment=0.1, initial_index=0)
     stqg_solver.animate("output/strsw_test_visual", "vorticity_anim", "PotentialVorticity")
