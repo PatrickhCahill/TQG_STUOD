@@ -132,6 +132,8 @@ class STRSWSolver():
         phi_cg = TestFunction(self.params.Vcg)
         phi_dg = TestFunction(self.params.Vdg)
         
+        un = 0.5*(dot(self.gradperp(self.psi0), self.params.facet_normal) + abs(dot(self.gradperp(self.psi0), self.params.facet_normal)))
+        u_in = 0.0  # no inflow boundary condition for our case
         
         # Write the problems and solvers: psi
         L_psi = phi_cg * self.q1 * dx - phi_cg * (1/self.eta1 * 1/self.params.Ro * self.f) * dx
@@ -146,16 +148,10 @@ class STRSWSolver():
         
         # Write the problems and solvers: q
         a_q = phi_dg * q_trial * dx
-        un = 0.5*(dot(self.gradperp(self.psi0), self.params.facet_normal) + abs(dot(self.gradperp(self.psi0), self.params.facet_normal)))
-
-
-        L_q = phi_dg * self.q1 * dx + self.params.dt * (
-            self.q1*div(phi_dg*self.gradperp(self.psi0))*dx                                                                                                                          \
-        #   - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) < 0, phi_dg*dot(self.gradperp(self.psi0), self.params.facet_normal)*u_in, 0.0)*ds # 0 because u_in = 0 in our case \
-          - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) > 0, phi_dg*dot(self.gradperp(self.psi0), self.params.facet_normal)*self.q1, 0.0)*ds                 \
-          - (phi_dg('+') - phi_dg('-'))*(un('+')*self.q1('+') - un('-')*self.q1('-'))*dS                                                                                             \
-          - phi_dg/(2*self.params.Fr**2) * (1/self.eta1) * nabla_div((self.eta1-self.params.bathymetry) * self.gradperp(self.b_cont_proj))*dx
-          )
+        L_q_interior = self.q1*div(phi_dg*self.gradperp(self.psi0))- phi_dg/(2*self.params.Fr**2) * (1/self.eta1) * nabla_div((self.eta1-self.params.bathymetry) * self.gradperp(self.b_cont_proj))
+        L_q_flux_ext = - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) < 0, phi_dg*dot(self.gradperp(self.psi0), self.params.facet_normal)*u_in, 0.0) - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) > 0, phi_dg*dot(self.gradperp(self.psi0), self.params.facet_normal)*self.q1, 0.0)
+        L_q_flux_int =  - (phi_dg('+') - phi_dg('-'))*(un('+')*self.q1('+') - un('-')*self.q1('-'))  
+        L_q = phi_dg * self.q1 * dx + self.params.dt * (L_q_interior * dx + L_q_flux_ext * ds + L_q_flux_int * dS)
 
         q_problem = LinearVariationalProblem(a_q, L_q, self.q_placeholder, bcs=self.params.bc_discontinuous)  # solve for dq1
         self.q_solver = LinearVariationalSolver(q_problem, \
@@ -168,23 +164,10 @@ class STRSWSolver():
 
         # Write the problems and solvers: b
         a_b = phi_dg * b_trial * dx
-
-        # naive advection term (no upwinding)
-        # L_b = phi_dg * dot(self.gradperp(self.psi0) , grad(b)) * dx * dt
-        # replacing original tqg code with upwinding code from https://www.firedrakeproject.org/demos/DG_advection.py.html
-
-        # self.params.facet_normal is the inbuilt unit normal vector over exterior and interior facets
-        # un = \hat{u} \cdot \hat{n}. i.e component of velocity normal to facet
-        un = 0.5*(dot(self.gradperp(self.psi0), self.params.facet_normal) + abs(dot(self.gradperp(self.psi0), self.params.facet_normal)))
-        # Then perform integration by parts over the advection term to write as 4 integrals with 3 depending on the boundaries
-
-
-        L_b =  phi_dg * self.b1 * dx + self.params.dt * (
-            self.b1*div(phi_dg*self.gradperp(self.psi0))*dx                                                                                                                          \
-        #   - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) < 0, phi_dg*dot(self.gradperp(self.psi0), self.params.facet_normal)*u_in, 0.0)*ds # 0 because u_in = 0 in our case \
-          - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) > 0, phi_dg*dot(self.gradperp(self.psi0), self.params.facet_normal)*self.b1, 0.0)*ds                 \
-          - (phi_dg('+') - phi_dg('-'))*(un('+')*self.b1('+') - un('-')*self.b1('-'))*dS)                                                                                            
-
+        L_b_interior = self.b1*div(phi_dg*self.gradperp(self.psi0))
+        L_b_flux_ext = - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) < 0, phi_dg*dot(self.gradperp(self.psi0), self.params.facet_normal)*u_in, u_in) - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) > 0, phi_dg*dot(self.gradperp(self.psi0), self.params.facet_normal)*self.b1, 0.0)
+        L_b_flux_int = - (phi_dg('+') - phi_dg('-'))*(un('+')*self.b1('+') - un('-')*self.b1('-')) 
+        L_b =  phi_dg * self.b1 * dx + self.params.dt * (L_b_interior * dx + L_b_flux_ext * ds + L_b_flux_int * dS)
 
         b_problem = LinearVariationalProblem(a_b, L_b, self.b_placeholder, bcs=self.params.bc_discontinuous)  # solve for db1
         self.b_solver = LinearVariationalSolver(b_problem, \
@@ -197,17 +180,11 @@ class STRSWSolver():
 
         # Write the porblems and solvers: eta
         a_eta = phi_cg * eta_trial * dx
-        # naive mass conservation (no upwinding)
-        # L_eta = phi_dg * nabla_div(self.gradperp(self.psi0) * self.eta0) * dx
-        # above code is upwinding for advection equation. now we do upwinding for mass conservation equation
-        un = 0.5*(dot(self.gradperp(self.psi0), self.params.facet_normal) + abs(dot(self.gradperp(self.psi0), self.params.facet_normal)))
+        L_eta_interior = dot(self.eta1 * self.gradperp(self.psi0), grad(phi_cg))
+        L_eta_flux_ext = - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) < 0, phi_dg*dot(self.gradperp(self.psi0), self.params.facet_normal)*u_in, u_in) - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) > 0, phi_dg*dot(self.gradperp(self.psi0), self.params.facet_normal)*self.eta1, 0.0)
+        L_eta_flux_int = - (phi_dg('+') - phi_dg('-'))*(un('+')*self.eta1('+') - un('-')*self.eta1('-')) 
+        L_eta = phi_cg * self.eta1 * dx - self.params.dt * ( L_eta_interior * dx + L_eta_flux_ext * ds + L_eta_flux_int * dS)
 
-        adv_eta = dot(self.eta1 * self.gradperp(self.psi0), grad(phi_cg)) * dx \
-            - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) > 0,
-                      phi_cg*dot(self.gradperp(self.psi0), self.params.facet_normal)*self.eta1, 0.0) * ds
-        L_eta = phi_cg * self.eta1 * dx - self.params.dt * adv_eta
-
-        
         eta_problem = LinearVariationalProblem(a_eta, L_eta, self.eta_placeholder, bcs=self.params.bc_eta)
         self.eta_solver = LinearVariationalSolver(eta_problem, \
             solver_parameters={
@@ -216,7 +193,7 @@ class STRSWSolver():
             }
             )
 
-    def cfl(self):
+    def cfl_max(self):
         Vu = VectorFunctionSpace(self.params.mesh, "CG",1)
         v = Function(Vu, name="Velocity")
         v.assign(project(self.gradperp(self.psi0),Vu))
@@ -225,7 +202,16 @@ class STRSWSolver():
         local_cfl = u_magnitude * self.params.dt.dat.data[0] / self.params.mesh.cell_sizes.dat.data.min()
         return local_cfl
 
-    def visualise_h5(self, sw_params, h5_data_name_prefix,  output_visual_name, time_start=0, time_end=0, time_increment=0, initial_index=0):
+    def cfl_median(self):
+        Vu = VectorFunctionSpace(self.params.mesh, "CG",1)
+        v = Function(Vu, name="Velocity")
+        v.assign(project(self.gradperp(self.psi0),Vu))
+
+        u_magnitude = np.sqrt(np.median((v.dat.data[:])**2))
+        local_cfl = u_magnitude * self.params.dt.dat.data[0] / self.params.mesh.cell_sizes.dat.data.min()
+        return local_cfl
+
+    def visualise_h5(self, h5_data_name_prefix,  output_visual_name, time_start=0, time_end=0, time_increment=0, initial_index=0):
         output_file = VTKFile(output_visual_name + ".pvd") 
         self.load_initial_conditions_from_file(f"{h5_data_name_prefix}_{initial_index}")
 
@@ -245,7 +231,7 @@ class STRSWSolver():
             v.assign(project(self.gradperp(self.psi0),Vu))
             output_file.write(self.initial_q, self.psi0, v, self.initial_b, self.initial_eta, time=t)
 
-    def animate(self, sw_params, output_visual_name, save_name, scalar=None):
+    def animate(self, output_visual_name, save_name, scalar=None):
         import pyvista as pv
         import matplotlib.pyplot as plt
         from matplotlib.animation import FuncAnimation
@@ -270,7 +256,7 @@ class STRSWSolver():
 
             plotter.camera_position = "iso"
 
-            plotter.add_title(f"{scalar} at time {(i * sw_params.dt.dat.data[0] * sw_params.dumpfreq):.2f}", font_size=10)
+            plotter.add_title(f"{scalar} at time {(i * self.params.dt.dat.data[0] * self.params.dumpfreq):.2f}", font_size=10)
             # Returns an RGBA numpy array
             img = plotter.screenshot(return_img=True)
 
@@ -458,11 +444,10 @@ class STRSWSolver():
             noise = np.sqrt(self.params.dt)**(-1) * np.random.normal(0., 1., zetas.shape[0] * iter_steps) if (zetas_file_name is not None) else np.zeros(zetas.shape[0] *  iter_steps)
             print_debug(f"Noise shape: {noise.shape}, Psi0 shape: {np.asarray(self.psi0.dat.data).shape}")
 
-
-
+        pbar = tqdm(np.arange(t,T,self.params.dt), colour='red', leave=True, desc="Training Progress")
         step = 0
-        for t in tqdm(np.arange(t,T,self.params.dt)):
-            print(self.cfl())
+        for t in pbar:
+            pbar.set_description(f"{self.cfl_max()=:.3f}, {self.cfl_median()=:.3f}")
             # sort out BM
             if self.solver_name == 'STRSW solver':
                 bms = noise[step:step+zetas.shape[0]]
@@ -563,9 +548,8 @@ class STRSWSolver():
 
 
 if __name__ == "__main__":
-    res = 64
+    res = 32
     mesh = UnitSquareMesh(res, res, name="mesh")
-
 
     T = 1
     dt = 0.01
@@ -575,8 +559,8 @@ if __name__ == "__main__":
     stqg_solver = STRSWSolver(sw_params)
     stqg_solver.clear_data()
     stqg_solver.solve(output_name="output/strsw_test", data_output_name="output/strsw_data_test", res=res)
-    stqg_solver.visualise_h5(sw_params, h5_data_name_prefix="output/strsw_data_test", output_visual_name="output/strsw_test_visual", time_start=0, time_end=T, time_increment=time_increment, initial_index=0)
-    stqg_solver.animate(sw_params, "output/strsw_test_visual", "vorticity_anim", "PotentialVorticity")
-    stqg_solver.animate(sw_params, "output/strsw_test_visual", "eta_anim", "Eta")
-    stqg_solver.animate(sw_params, "output/strsw_test_visual", "buoyancy_anim", "Buoyancy")
-    stqg_solver.animate(sw_params, "output/strsw_test_visual", "streamfunction_anim", "Streamfunction")
+    stqg_solver.visualise_h5(h5_data_name_prefix="output/strsw_data_test", output_visual_name="output/strsw_test_visual", time_start=0, time_end=T, time_increment=time_increment, initial_index=0)
+    stqg_solver.animate("output/strsw_test_visual", "vorticity_anim", "PotentialVorticity")
+    stqg_solver.animate("output/strsw_test_visual", "eta_anim", "Eta")
+    stqg_solver.animate("output/strsw_test_visual", "buoyancy_anim", "Buoyancy")
+    stqg_solver.animate("output/strsw_test_visual", "streamfunction_anim", "Streamfunction")
