@@ -134,7 +134,9 @@ class STRSWSolver():
         
         un = 0.5*(dot(self.gradperp(self.psi0), self.params.facet_normal) + abs(dot(self.gradperp(self.psi0), self.params.facet_normal)))
         u_in = 0.0  # no inflow boundary condition for our case
-        
+        def upwind(phi, f):
+            return (phi('+') - phi('-'))*(un('+')*f('+') - un('-')*f('-'))
+
         # Write the problems and solvers: psi
         L_psi = phi_cg * self.q1 * dx - phi_cg * (1/self.eta1 * 1/self.params.Ro * self.f) * dx
         a_psi = -dot(grad(phi_cg / self.eta1), grad(psi)) * dx
@@ -150,7 +152,7 @@ class STRSWSolver():
         a_q = phi_dg * q_trial * dx
         L_q_interior = self.q1*div(phi_dg*self.gradperp(self.psi0))- phi_dg/(2*self.params.Fr**2) * (1/self.eta1) * nabla_div((self.eta1-self.params.bathymetry) * self.gradperp(self.b_cont_proj))
         L_q_flux_ext = - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) < 0, phi_dg*dot(self.gradperp(self.psi0), self.params.facet_normal)*u_in, 0.0) - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) > 0, phi_dg*dot(self.gradperp(self.psi0), self.params.facet_normal)*self.q1, 0.0)
-        L_q_flux_int =  - (phi_dg('+') - phi_dg('-'))*(un('+')*self.q1('+') - un('-')*self.q1('-'))  
+        L_q_flux_int =  - upwind(phi_dg, self.q1)  
         L_q = phi_dg * self.q1 * dx + self.params.dt * (L_q_interior * dx + L_q_flux_ext * ds + L_q_flux_int * dS)
 
         q_problem = LinearVariationalProblem(a_q, L_q, self.q_placeholder, bcs=self.params.bc_discontinuous)  # solve for dq1
@@ -166,7 +168,7 @@ class STRSWSolver():
         a_b = phi_dg * b_trial * dx
         L_b_interior = self.b1*div(phi_dg*self.gradperp(self.psi0))
         L_b_flux_ext = - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) < 0, phi_dg*dot(self.gradperp(self.psi0), self.params.facet_normal)*u_in, u_in) - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) > 0, phi_dg*dot(self.gradperp(self.psi0), self.params.facet_normal)*self.b1, 0.0)
-        L_b_flux_int = - (phi_dg('+') - phi_dg('-'))*(un('+')*self.b1('+') - un('-')*self.b1('-')) 
+        L_b_flux_int = - upwind(phi_dg, self.b1)  
         L_b =  phi_dg * self.b1 * dx + self.params.dt * (L_b_interior * dx + L_b_flux_ext * ds + L_b_flux_int * dS)
 
         b_problem = LinearVariationalProblem(a_b, L_b, self.b_placeholder, bcs=self.params.bc_discontinuous)  # solve for db1
@@ -181,8 +183,8 @@ class STRSWSolver():
         # Write the porblems and solvers: eta
         a_eta = phi_cg * eta_trial * dx
         L_eta_interior = dot(self.eta1 * self.gradperp(self.psi0), grad(phi_cg))
-        L_eta_flux_ext = - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) < 0, phi_dg*dot(self.gradperp(self.psi0), self.params.facet_normal)*u_in, u_in) - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) > 0, phi_dg*dot(self.gradperp(self.psi0), self.params.facet_normal)*self.eta1, 0.0)
-        L_eta_flux_int = - (phi_dg('+') - phi_dg('-'))*(un('+')*self.eta1('+') - un('-')*self.eta1('-')) 
+        L_eta_flux_ext = - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) < 0, phi_cg*dot(self.gradperp(self.psi0), self.params.facet_normal)*u_in, u_in) - conditional(dot(self.gradperp(self.psi0), self.params.facet_normal) > 0, phi_cg*dot(self.gradperp(self.psi0), self.params.facet_normal)*self.eta1, 0.0)
+        L_eta_flux_int = - upwind(phi_cg, self.eta1) 
         L_eta = phi_cg * self.eta1 * dx - self.params.dt * ( L_eta_interior * dx + L_eta_flux_ext * ds + L_eta_flux_int * dS)
 
         eta_problem = LinearVariationalProblem(a_eta, L_eta, self.eta_placeholder, bcs=self.params.bc_eta)
