@@ -14,7 +14,11 @@ from tqdm import tqdm
 import warnings
 from math import ceil
 
+DEBUG = False
 
+def print_debug(msg):
+    if DEBUG:
+        print(msg)
 
 def tqg_energy(q, psi, f, h, b):
     return 0.5*assemble( (psi*(q-f) + h*b)*dx )
@@ -220,7 +224,7 @@ class STRSWSolver():
 
         for t in np.arange(time_increment, time_end, time_increment):
             initial_index += 1
-            print(f"{h5_data_name_prefix}_{initial_index}", flush=True)
+            print_debug(f"{h5_data_name_prefix}_{initial_index}")
             self.load_initial_conditions_from_file(f"{h5_data_name_prefix}_{initial_index}")
             Vu = VectorFunctionSpace(self.mesh, "CG",1)
             Vcg = FunctionSpace(self.mesh, "CG",1)
@@ -279,29 +283,15 @@ class STRSWSolver():
 
         Loads pv, buoyancy and streamfunction
         """
-        # PETSc.Sys.Print(norm(self.initial_cond))
-        # with DumbCheckpoint(h5_data_name, mode=FILE_READ) as chk:
-        #     chk.load(self.initial_cond, name="PotentialVorticity")
-        #     chk.load(self.initial_b, name="Buoyancy")
-        #     chk.load(self.psi0, name="Streamfunction")
-        #     try:
-        #         chk.load(self.ssh, name="SSH")
-        #     except:
-        #         print('no ssh in data')
-        #         #pass
+
 
         with CheckpointFile(f"{h5_data_name}.h5", "r") as chk:
             self.mesh = chk.load_mesh("mesh")
             self.initial_cond = chk.load_function(self.mesh, name="PotentialVorticity")
             self.initial_b = chk.load_function(self.mesh, name="Buoyancy")
             self.psi0 = chk.load_function(self.mesh, name="Streamfunction")
-            try:
-                self.ssh = chk.load_function(self.mesh, name="SSH")
-            except:
-                print('no ssh in data')
-                #pass
+            self.ssh = chk.load_function(self.mesh, name="SSH")
 
-        # PETSc.Sys.Print(norm(self.initial_cond))
 
     def save_velocity_grid_data(self, h5_data_name, res):
         """
@@ -329,8 +319,7 @@ class STRSWSolver():
         self.q1.assign(q0)
         self.psi_solver.solve()
         v.project(self.gradperp(self.psi0))
-        # PETSc.Sys.Print(norm(v), v.at([0.5, 0.5], tolerance=1e-10), flush=True)
-        # PETSc.Sys.Print(h5_data_name)
+
 
         # Use PointEvaluator instead of deprecated Function.at
         from firedrake import PointEvaluator
@@ -453,8 +442,7 @@ class STRSWSolver():
             noise = rho * state_store + np.sqrt((1. - rho**2) /self.params.dt) * np.random.normal(0, 1, zetas.shape[0] * iter_steps)
         else:
             noise = np.sqrt(self.params.dt)**(-1) * np.random.normal(0., 1., zetas.shape[0] * iter_steps) if ((zetas_file_name is not None) or (bathymetry_xi is True)) else np.zeros(zetas.shape[0] *  iter_steps)
-            #print(noise, flush=True)
-        #print(noise.shape, np.asarray(self.psi0.dat.data).shape)
+            print_debug(f"Noise shape: {noise.shape}, Psi0 shape: {np.asarray(self.psi0.dat.data).shape}")
 
 
 
@@ -477,21 +465,21 @@ class STRSWSolver():
             
             self.q_solver.solve()     
             self.b_solver.solve()
-            print("Pre solve")
-            print(min(self.eta1.dat.data[:]))
+            print_debug("Pre solve")
+            print_debug(min(self.eta1.dat.data[:]))
             self.eta_solver.solve()
-            print("Post solve, pre assign (if not equal this is bad)")
-            print(min(self.eta1.dat.data[:]))
+            print_debug("Post solve, pre assign (if not equal this is bad)")
+            print_debug(min(self.eta1.dat.data[:]))
 
             # # Find intermediate solution q^(1)
             self.b1.assign(self.b_placeholder)
             self.b_cont_proj.assign(project(self.b1, self.params.Vcg))
             self.q1.assign(self.q_placeholder)
-            print("Placeholder eta min before assign")
-            print(min(self.eta_placeholder.dat.data[:]))
+            print_debug("Placeholder eta min before assign")
+            print_debug(min(self.eta_placeholder.dat.data[:]))
             self.eta1.assign(self.eta_placeholder)
-            print("Post solve, post assign eta (if negative this is bad)")
-            print(min(self.eta1.dat.data[:]))
+            print_debug("Post solve, post assign eta (if negative this is bad)")
+            print_debug(min(self.eta1.dat.data[:]))
             self.psi_solver.solve()
             self.psi0.dat.data[:] += psi0_perturbation
             
@@ -551,18 +539,11 @@ class STRSWSolver():
                     data_chk.save_function(self.psi0, name="Streamfunction")
                     data_chk.save_function(eta0, name="eta")
 
-                #PETSc.Sys.Print(_t,"/",T, " ", _te, _ke, _pe, flush=True)
         self.initial_q.assign(q0)
         self.initial_b.assign(b0)
         self.initial_eta.assign(eta0)
 
-        # close checkpoint if opened
-        try:
-            if data_chk is not None:
-                data_chk.close()
-        except Exception:
-            pass
-
+        data_chk.close()
         return noise
 
 
