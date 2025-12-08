@@ -14,11 +14,14 @@ from tqdm import tqdm
 import warnings
 from math import ceil
 
-DEBUG = False
+DEBUG = True
 
-def print_debug(msg):
+def print_debug(msg,pbar=None):
     if DEBUG:
-        print(msg)
+        if pbar is not None:
+            pbar.write(str(msg))
+        else:
+            print(msg)
 
 def tqg_energy(q, psi, f, h, b):
     return 0.5*assemble( (psi*(q-f) + h*b)*dx )
@@ -96,8 +99,6 @@ class STRSWParams():
 
     def set_damping_rate(self):
         return Constant(0.)
-
-
 
 class STRSWSolver():
     def __init__(self, sw_params):
@@ -220,7 +221,7 @@ class STRSWSolver():
 
     def visualise_h5(self, h5_data_name_prefix,  output_visual_name, time_start=0, time_end=0, time_increment=0, initial_index=0):
         output_file = VTKFile(output_visual_name + ".pvd") 
-        self.load_initial_conditions_from_file(f"{h5_data_name_prefix}_{initial_index}")
+        self.load_initial_conditions_from_file(f"{h5_data_name_prefix}_{initial_index:03d}")
 
         Vu = VectorFunctionSpace(self.mesh, "CG",1)
         v = Function(Vu, name="Velocity")
@@ -230,8 +231,8 @@ class STRSWSolver():
 
         for t in np.arange(time_increment, time_end, time_increment):
             initial_index += 1
-            print_debug(f"{h5_data_name_prefix}_{initial_index}")
-            self.load_initial_conditions_from_file(f"{h5_data_name_prefix}_{initial_index}")
+            print_debug(f"t={t}: {h5_data_name_prefix}_{initial_index:03d}")
+            self.load_initial_conditions_from_file(f"{h5_data_name_prefix}_{initial_index:03d}")
             Vu = VectorFunctionSpace(self.mesh, "CG",1)
             Vcg = FunctionSpace(self.mesh, "CG",1)
             v = Function(Vu, name="Velocity")
@@ -419,7 +420,7 @@ class STRSWSolver():
         output_file.write(q0, self.psi0, u, b0, eta0, time=0)
     
         # store initial snapshot with explicit names
-        spef_data_output_name = f"{data_output_name}_{index}.h5"
+        spef_data_output_name = f"{data_output_name}_{index:03d}.h5"
         with CheckpointFile(spef_data_output_name, mode="w") as data_chk:
             data_chk.save_mesh(self.params.mesh)
             data_chk.save_function(q0, name="PotentialVorticity")
@@ -472,21 +473,20 @@ class STRSWSolver():
             
             self.q_solver.solve()     
             self.b_solver.solve()
-            print_debug("Pre solve")
-            print_debug(min(self.eta1.dat.data[:]))
+            print_debug("Pre solve", pbar)
+            print_debug(min(self.eta1.dat.data[:]), pbar)
             self.eta_solver.solve()
-            print_debug("Post solve, pre assign (if not equal this is bad)")
-            print_debug(min(self.eta1.dat.data[:]))
-
+            print_debug("Post solve, pre assign (if not equal this is bad)", pbar)
+            print_debug(min(self.eta1.dat.data[:]), pbar)
             # # Find intermediate solution q^(1)
             self.b1.assign(self.b_placeholder)
             self.b_cont_proj.assign(project(self.b1, self.params.Vcg))
             self.q1.assign(self.q_placeholder)
-            print_debug("Placeholder eta min before assign")
-            print_debug(min(self.eta_placeholder.dat.data[:]))
+            print_debug("Placeholder eta min before assign", pbar)
+            print_debug(min(self.eta_placeholder.dat.data[:]), pbar)
             self.eta1.assign(self.eta_placeholder)
-            print_debug("Post solve, post assign eta (if negative this is bad)")
-            print_debug(min(self.eta1.dat.data[:]))
+            print_debug("Post solve, post assign eta (if negative this is bad)", pbar)
+            print_debug(min(self.eta1.dat.data[:]), pbar)
             self.psi_solver.solve()
             self.psi0.dat.data[:] += psi0_perturbation
             
@@ -536,9 +536,9 @@ class STRSWSolver():
                 arr = pe.evaluate(u)
     
 
-                np.save(f"{data_output_name}_energy_{index}", arr)
+                np.save(f"{data_output_name}_energy_{index:03d}", arr)
 
-                spef_data_output_name = f"{data_output_name}_{index}.h5"
+                spef_data_output_name = f"{data_output_name}_{index:03d}.h5"
                 with CheckpointFile(spef_data_output_name, mode="w") as data_chk:
                     data_chk.save_mesh(self.params.mesh)
                     data_chk.save_function(q0, name="PotentialVorticity")
