@@ -14,7 +14,7 @@ from tqdm import tqdm
 import warnings
 from math import ceil
 
-DEBUG = True
+DEBUG = False
 
 def print_debug(msg,pbar=None):
     if DEBUG:
@@ -101,11 +101,29 @@ class STRSWParams():
         return Constant(0.)
 
 class STRSWSolver():
-    def __init__(self, sw_params):
+    def __init__(self, sw_params, output_dir="./output/"):
         self.id = 0
         self.solver_name = 'STRSW solver'
-
         self.params = sw_params
+
+        # Create the correct file structure
+        self.output_dir = output_dir
+        self.data_test = "strsw_data_test"
+        self.test_dir = "strsw_test"
+        self.visual_dir = "strsw_test_visual"
+        
+        # if not os.path.exists(self.output_dir):
+        #     os.makedirs(self.output_dir)  
+        # if not os.path.exists(os.path.join(self.output_dir, self.data_test)):
+        #     os.makedirs(os.path.join(self.output_dir, self.data_test))
+        # if not os.path.exists(os.path.join(self.output_dir, self.test_dir)):
+        #     os.makedirs(os.path.join(self.output_dir, self.test_dir))
+        # if not os.path.exists(os.path.join(self.output_dir, self.visual_dir)):
+        #     os.makedirs(os.path.join(self.output_dir, self.visual_dir))
+        
+
+    
+
 
         # Define perpendicular gradient operator
         self.gradperp = lambda _u : as_vector((-_u.dx(1), _u.dx(0)))
@@ -219,9 +237,14 @@ class STRSWSolver():
         local_cfl = u_magnitude * self.params.dt.dat.data[0] / self.params.mesh.cell_sizes.dat.data.min()
         return local_cfl
 
-    def visualise_h5(self, h5_data_name_prefix,  output_visual_name, time_start=0, time_end=0, time_increment=0, initial_index=0):
-        output_file = VTKFile(output_visual_name + ".pvd") 
-        self.load_initial_conditions_from_file(f"{h5_data_name_prefix}_{initial_index:03d}")
+    def visualise_h5(self, time_start=0, time_end=0, time_increment=0, initial_index=0):
+
+        if os.path.exists(os.path.join(self.output_dir, self.visual_dir)):
+            shutil.rmtree(os.path.join(self.output_dir, self.visual_dir))
+        os.makedirs(os.path.join(self.output_dir, self.visual_dir))
+
+        output_file = VTKFile(f"{os.path.join(self.output_dir, self.visual_dir)}.pvd") 
+        self.load_initial_conditions_from_file(f"{os.path.join(self.output_dir, self.data_test)}_{initial_index:03d}")
 
         Vu = VectorFunctionSpace(self.mesh, "CG",1)
         v = Function(Vu, name="Velocity")
@@ -231,23 +254,35 @@ class STRSWSolver():
 
         for t in np.arange(time_increment, time_end, time_increment):
             initial_index += 1
-            print_debug(f"t={t}: {h5_data_name_prefix}_{initial_index:03d}")
-            self.load_initial_conditions_from_file(f"{h5_data_name_prefix}_{initial_index:03d}")
+            print_debug(f"t={t}: {os.path.join(self.output_dir, self.data_test)}_{initial_index:03d}")
+            self.load_initial_conditions_from_file(f"{os.path.join(self.output_dir, self.data_test)}_{initial_index:03d}")
             Vu = VectorFunctionSpace(self.mesh, "CG",1)
             Vcg = FunctionSpace(self.mesh, "CG",1)
             v = Function(Vu, name="Velocity")
             v.assign(project(self.gradperp(self.psi0),Vu))
             output_file.write(self.initial_q, self.psi0, v, self.initial_b, self.initial_eta, time=t)
 
-    def animate(self, output_visual_name, save_name, scalar=None):
+        # Rename the visual files so that they are ordered correctly. i.e correct the numbers to be :03d formated.
+        for filename in sorted(os.listdir(f"{os.path.join(self.output_dir, self.visual_dir)}")):
+            if filename.endswith(".vtu"):
+                i = int(filename.split("_")[-1].split(".vtu")[0])
+                new_filename = f"strsw_test_visual_{i:03d}.vtu"
+                os.rename(os.path.join(self.output_dir, self.visual_dir, filename), os.path.join(self.output_dir, self.visual_dir, new_filename))
+
+
+    def animate(self, save_name, scalar=None):
         import pyvista as pv
         import matplotlib.pyplot as plt
         from matplotlib.animation import FuncAnimation
         
+        if not os.path.exists(os.path.join(self.output_dir, "animations")):
+            os.makedirs(os.path.join(self.output_dir, "animations"))
+
         filepaths = []
-        for i in sorted(os.listdir(output_visual_name)):
-            if ".vtu" in i:
-                filepaths.append(f"{output_visual_name}/{i}")
+        for filename in sorted(os.listdir(f"{os.path.join(self.output_dir, self.visual_dir)}")):
+            if filename.endswith(".vtu"):
+                print_debug(filename)
+                filepaths.append(f"{os.path.join(self.output_dir, self.visual_dir)}/{filename}")
         pv.OFF_SCREEN = True
 
 
@@ -283,7 +318,7 @@ class STRSWSolver():
 
         anim = FuncAnimation(fig, update, frames=len(images), interval=200)
 
-        anim.save(f"{output_visual_name}/{save_name}.mp4", fps=5, dpi=150)
+        anim.save(f"{os.path.join(self.output_dir, "animations")}/{save_name}.mp4", fps=5, dpi=150)
 
     def load_initial_conditions_from_file(self, h5_data_name):
         """
@@ -345,6 +380,19 @@ class STRSWSolver():
         if os.path.exists("./output"):
             shutil.rmtree("./output")
 
+    def save_data(self, index, mesh, q0, b0, psi0, eta0):
+        
+        spef_data_output_name = f"{self.output_dir}strsw_data_test_{index:03d}.h5"
+        with CheckpointFile(spef_data_output_name, mode="w") as data_chk:
+            data_chk.save_mesh(mesh)
+            data_chk.save_function(q0, name="PotentialVorticity")
+            data_chk.save_function(b0, name="Buoyancy")
+            data_chk.save_function(psi0, name="Streamfunction")
+            data_chk.save_function(eta0, name="Eta")
+        
+        if data_chk is not None:
+            data_chk.close()
+
     def get_streamfunction_grid_data(self, h5_data_name, grid_point):
         """
         Takes checkpoint data (pv, buoyancy) and save corresponding streamfunction grid values for autocorrelation analysis
@@ -370,7 +418,9 @@ class STRSWSolver():
         vals = pe.evaluate(self.psi0)
         return np.asarray(vals)[0]
 
-    def solve(self, output_name, data_output_name, res, zetas_file_name=None, **kwargs):
+
+
+    def solve(self, res, zetas_file_name=None, **kwargs):
         """
         solve the STQG system given initial condition q0
 
@@ -416,17 +466,11 @@ class STRSWSolver():
 
         ##### Set up output files #####
         # always create visual output and checkpoint (may raise if invalid paths)
-        output_file = VTKFile(output_name + ".pvd")
+        output_file = VTKFile(f"{os.path.join(self.output_dir, self.test_dir)}.pvd")
         output_file.write(q0, self.psi0, u, b0, eta0, time=0)
     
         # store initial snapshot with explicit names
-        spef_data_output_name = f"{data_output_name}_{index:03d}.h5"
-        with CheckpointFile(spef_data_output_name, mode="w") as data_chk:
-            data_chk.save_mesh(self.params.mesh)
-            data_chk.save_function(q0, name="PotentialVorticity")
-            data_chk.save_function(b0, name="Buoyancy")
-            data_chk.save_function(eta0, name="Eta")
-            data_chk.save_function(self.psi0, name="Streamfunction")
+        self.save_data(index, self.params.mesh, q0, b0, self.psi0, eta0)
 
 
 
@@ -531,43 +575,42 @@ class STRSWSolver():
                 # always save spectrum snapshot
                 index += 1
 
-                from firedrake import PointEvaluator
                 pe = PointEvaluator(u.function_space().mesh(), mesh_grid, tolerance=1e-10)
                 arr = pe.evaluate(u)
-    
-
-                np.save(f"{data_output_name}_energy_{index:03d}", arr)
-
-                spef_data_output_name = f"{data_output_name}_{index:03d}.h5"
-                with CheckpointFile(spef_data_output_name, mode="w") as data_chk:
-                    data_chk.save_mesh(self.params.mesh)
-                    data_chk.save_function(q0, name="PotentialVorticity")
-                    data_chk.save_function(b0, name="Buoyancy")
-                    data_chk.save_function(self.psi0, name="Streamfunction")
-                    data_chk.save_function(eta0, name="Eta")
+                np.save(f"{self.output_dir}strsw_data_test_energy_{index:03d}", arr)
+                self.save_data(index, self.params.mesh, q0, b0, self.psi0, eta0)
 
         self.initial_q.assign(q0)
         self.initial_b.assign(b0)
         self.initial_eta.assign(eta0)
 
-        data_chk.close()
+        # handle file name of the test folder
+        for filename in sorted(os.listdir(f"{os.path.join(self.output_dir, self.test_dir)}")):
+            if filename.endswith(".vtu"):
+                i = int(filename.split("_")[-1].split(".vtu")[0])
+                new_filename = f"strsw_test_{i:03d}.vtu"
+                os.rename(os.path.join(self.output_dir, self.test_dir, filename), os.path.join(self.output_dir, self.test_dir, new_filename))
+
+
+
         return noise
 
 
 if __name__ == "__main__":
-    res = 100
+    res = 32
     mesh = UnitSquareMesh(res, res, name="mesh")
 
-    T = 1.
-    dt = 0.005
+    T = 3.4
+    dt = 0.01
     dumpfreq=10
     time_increment = dt * dumpfreq
     sw_params = STRSWParams(dt=dt, mesh=mesh, t=T, bc='y', dumpfreq=dumpfreq)
-    stqg_solver = STRSWSolver(sw_params)
+    stqg_solver = STRSWSolver(sw_params,
+                              output_dir = "./output/")
     stqg_solver.clear_data()
-    stqg_solver.solve(output_name="output/strsw_test", data_output_name="output/strsw_data_test", res=res)
-    stqg_solver.visualise_h5(h5_data_name_prefix="output/strsw_data_test", output_visual_name="output/strsw_test_visual", time_start=0, time_end=T, time_increment=time_increment, initial_index=0)
-    stqg_solver.animate("output/strsw_test_visual", "vorticity_anim", "PotentialVorticity")
-    stqg_solver.animate("output/strsw_test_visual", "eta_anim", "Eta")
-    stqg_solver.animate("output/strsw_test_visual", "buoyancy_anim", "Buoyancy")
-    stqg_solver.animate("output/strsw_test_visual", "streamfunction_anim", "Streamfunction")
+    stqg_solver.solve(res=res)
+    stqg_solver.visualise_h5(time_start=0, time_end=T, time_increment=time_increment, initial_index=0)
+    stqg_solver.animate("vorticity_anim", "PotentialVorticity")
+    stqg_solver.animate("eta_anim", "Eta")
+    stqg_solver.animate("buoyancy_anim", "Buoyancy")
+    stqg_solver.animate("streamfunction_anim", "Streamfunction")
